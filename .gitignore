@@ -1,0 +1,14 @@
+# Vivado 忽略文件列表
+*.jou
+*.log
+*.pb
+*.wdb
+*.vcd
+*.str
+.Xil/
+*/.Xil/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
