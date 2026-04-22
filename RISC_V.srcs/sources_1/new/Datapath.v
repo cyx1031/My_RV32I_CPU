@@ -96,7 +96,7 @@ module InstMem #(//程序存储器
     output wire [WIDTH-1:0] inst_out
 );
     reg [WIDTH-1:0]rom [0:1023];
-    wire [29:0] word_addr; 
+    wire [9:0] word_addr; 
     assign word_addr = PC_addr[31:2];
     assign inst_out = rom[word_addr];
     initial begin
@@ -105,11 +105,11 @@ module InstMem #(//程序存储器
 
 endmodule
 
-module immGen #(
+module immGen #(//立即数生成器
     parameter WIDTH = 32
 ) (
     input wire [WIDTH-1:0] inst,
-    input wire [3:0] immSel,//I,S,B,U,J
+    input wire [3:0] immSel,//I,S,B,J,U
     output reg [WIDTH-1:0] Imm_out
 );
     always @(*) begin
@@ -117,8 +117,9 @@ module immGen #(
             4'd0 : Imm_out = { {20{inst[31]}} , inst[31:20] };//I
             4'd1 : Imm_out = { {20{inst[31]}} , inst[31:25] , inst[11:7]};//S
             4'd2 : Imm_out = { {20{inst[31]}} , inst[7] , inst[30:25] , inst[11:8] ,1'b0};//B
-            4'd3 : Imm_out = { {inst[31:12]}  , 12'b0};//U
-            4'd4 : Imm_out = { {12{inst[31]}} , inst[19:12] , inst[20] , inst[30:21] , 1'b0};//J
+            4'd3 : Imm_out = { {12{inst[31]}} , inst[19:12] , inst[20] , inst[30:21] , 1'b0};//J
+            4'd4 : Imm_out = { {inst[31:12]}  , 12'b0};//U
+            default: Imm_out = 32'b0;
         endcase
     end
 endmodule
@@ -133,7 +134,7 @@ module DataMem #(   //数据存储器
     input wire CLK
 );
     reg [WIDTH-1:0] regs [0:1023];
-    wire [9:0] Dword_addr = Addr[11:2];
+    wire [9:0] Dword_addr = Draddr[11:2];
     assign Drdata = regs[Dword_addr];//read
     
       always @(posedge CLK) begin//write
@@ -144,10 +145,107 @@ module DataMem #(   //数据存储器
     end
 endmodule
 
-module moduleName #(
-    parameters
+module Control_Unit  #(//控制单元
+    parameter WIDTH =32
 ) (
-    ports
+    input wire [WIDTH-1:0] inst,
+    output reg Branch,//分支？
+    output reg MemRead,//lw?读取内存？
+    output reg MemWrite,//sw?写入内存？
+    output reg RegWrite,//写入reg?
+    output reg [1:0]MemtoReg,//写入reg来自ALU(0)/读内存
+    output reg ALUSrc,//ALU数据来自reg(0)/Imm?
+    output reg [3:0] ALUControl,//ALUselect
+    output reg [3:0]ImmSel,//立即数格式？
+    output reg Jump
 );
-    
+    wire [6:0]opcode = inst[6:0];//做什么操作
+    wire [2:0]funct3  = inst[14:12];//做什么指令？
+    wire funct7_bit5 = inst[30];//区分add/sub,srl/sra
+    reg  [1:0] ALUOp ;//给ALU的解码器：
+    //2'b00：内存指令；2'b01：分支；2'b10：R-Type；2'b11： I-Type；
+    always @(*) begin
+        Branch     = 0;
+        MemRead    = 0;
+        MemWrite   = 0;
+        RegWrite   = 0;
+        MemtoReg   = 2'b00;
+        ALUSrc     = 0;
+        ImmSel     = 4'd0;
+        ALUOp      = 2'b00;
+        Jump       = 0; 
+        case (opcode)
+        7'b0110011: //R-Type 纯寄存器运算
+        begin
+            RegWrite = 1; ALUOp = 2'b10;
+        end
+        7'b0010011://I-Type 立即数运算
+        begin
+            RegWrite = 1; ALUSrc = 1; ALUOp = 2'b11; ImmSel = 4'd0;
+        end
+        7'b0000011://Load 读内存
+        begin
+            MemRead = 1; RegWrite = 1; MemtoReg = 2'b01; ALUSrc = 1; ALUOp = 2'b00; ImmSel = 4'd0;
+        end
+        7'b0100011://Store 写内存
+        begin
+            MemWrite = 1; ALUSrc = 1; ALUOp = 2'b00; ImmSel = 4'd1;
+        end
+        7'b1100011://B-Type 条件跳转
+        begin
+            Branch = 1; ALUOp = 2'b01; ImmSel = 4'd2;
+        end
+        7'b1101111://J-Type 无条件跳转
+        begin
+            Jump = 1; RegWrite = 1; MemtoReg = 2'b10; ALUOp = 2'b01; ImmSel = 4'd3;
+        end
+        7'b0110111://U-Type 高位立即数
+        begin
+            RegWrite = 1; MemtoReg = 2'b11; ImmSel = 4'd4;
+        end
+        endcase
+    end
+    always @(*) begin
+        ALUControl = 4'd0;  
+        case (ALUOp)//给ALU的信号
+            2'b00 : ALUControl = 4'd0 ;//内存指令加法算地址
+            2'b01 : ALUControl = 4'd1;//Branch指令减法算条件
+            2'b10 ://R-Type
+            begin
+                case (funct3)
+                    3'b000 : begin
+                    if (!funct7_bit5) ALUControl = 4'd0;
+                    else ALUControl = 4'd1;
+                    end
+                    3'b001 : ALUControl = 4'd5; 
+                    3'b010 : ALUControl = 4'd8;
+                    3'b011 : ALUControl = 4'd9;
+                    3'b100 : ALUControl = 4'd4;
+                    3'b101 : begin
+                    if (!funct7_bit5) ALUControl = 4'd6;
+                    else ALUControl = 4'd7;
+                    end
+                    3'b110 : ALUControl = 4'd3;
+                    3'b111 : ALUControl = 4'd2;
+                endcase
+            end
+            2'b11 ://I-Type
+            begin
+                case (funct3)
+                    3'b000 : ALUControl = 4'd0; 
+                    3'b001 : ALUControl = 4'd5; 
+                    3'b010 : ALUControl = 4'd8;
+                    3'b011 : ALUControl = 4'd9;
+                    3'b100 : ALUControl = 4'd4;
+                    3'b101 : begin
+                    if (!funct7_bit5) ALUControl = 4'd6;
+                    else ALUControl = 4'd7;
+                    end
+                    3'b110 : ALUControl = 4'd3;
+                    3'b111 : ALUControl = 4'd2;
+                endcase
+            end
+        endcase
+    end
+
 endmodule
