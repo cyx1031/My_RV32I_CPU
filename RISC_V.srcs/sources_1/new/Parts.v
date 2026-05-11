@@ -88,14 +88,15 @@ module PC_Register #(//程序计数器1
     parameter WIDTH = 32
 ) (
     input  wire CLK,
-    input  wire reset,           
+    input  wire reset,   
+    input  wire PC_Write,           // PC写使能（1更新，0暂停）
     input  wire [WIDTH-1:0] next_PC ,   
     output reg  [WIDTH-1:0] current_PC 
 );
     always @(posedge CLK) begin
         if (reset) 
             current_PC <= 32'd0;     
-        else 
+        else if (PC_Write)          // 只有在 PC_Write 为 1 时才更新
             current_PC <= next_PC;   
     end
 endmodule
@@ -455,5 +456,81 @@ module MEM_WB #(
     output reg              o_MEM_WB_RegWrite  ,
     output reg        [1:0] o_MEM_WB_MemtoReg
 );
+     always @(posedge CLK) begin
+        if (MEM_WB_reset) begin
+            o_MEM_WB_PC         <= 32'b0;
+            o_MEM_WB_alu_result <= 32'b0;
+            o_MEM_WB_mem_rdata  <= 32'b0;
+            o_MEM_WB_imm        <= 32'b0;
+            o_MEM_WB_rd         <= 5'b0 ;
+            o_MEM_WB_RegWrite   <= 1'b0 ;
+            o_MEM_WB_MemtoReg   <= 2'b0 ;
+        end else begin
+            o_MEM_WB_PC         <= MEM_WB_PC        ;
+            o_MEM_WB_alu_result <= MEM_WB_alu_result;
+            o_MEM_WB_mem_rdata  <= MEM_WB_mem_rdata ;
+            o_MEM_WB_imm        <= MEM_WB_imm       ;
+            o_MEM_WB_rd         <= MEM_WB_rd        ;
+            o_MEM_WB_RegWrite   <= MEM_WB_RegWrite  ;
+            o_MEM_WB_MemtoReg   <= MEM_WB_MemtoReg  ;
+        end
+    end
+endmodule
+
+module ForwardingUnit (//旁路转发单元
+    input  wire [4:0] ID_EX_rs1,       // 当前正在 EX 阶段的指令的 rs1
+    input  wire [4:0] ID_EX_rs2,       // 当前正在 EX 阶段的指令的 rs2
     
+    input  wire [4:0] EX_MEM_rd,       // 前一条指令的目标寄存器 (MEM阶段)
+    input  wire       EX_MEM_RegWrite, // 前一条指令是否写寄存器
+    
+    input  wire [4:0] MEM_WB_rd,       // 前前一条指令的目标寄存器 (WB阶段)
+    input  wire       MEM_WB_RegWrite, // 前前一条指令是否写寄存器
+    
+    output reg  [1:0] ForwardA,        // 控制 ALU 的第一个输入 (00:正常, 10:来自EX/MEM, 01:来自MEM/WB)
+    output reg  [1:0] ForwardB         // 控制 ALU 的第二个输入
+);
+    always @(*) begin
+        // 默认不转发，使用 ID/EX 传下来的正常值
+        ForwardA = 2'b00;
+        ForwardB = 2'b00;
+
+        // 1. EX 冒险 (前一条指令刚好是我们要用的) -> 优先级最高
+        if (EX_MEM_RegWrite && (EX_MEM_rd != 5'd0) && (EX_MEM_rd == ID_EX_rs1)) begin
+            ForwardA = 2'b10;
+        end
+        if (EX_MEM_RegWrite && (EX_MEM_rd != 5'd0) && (EX_MEM_rd == ID_EX_rs2)) begin
+            ForwardB = 2'b10;
+        end
+
+        // 2. MEM 冒险 (前前一条指令是我们需要的)
+        // 只有当 EX_MEM 阶段没有引发冒险时，才去查 MEM_WB。因为距离越近的指令数据越新
+        if (MEM_WB_RegWrite && (MEM_WB_rd != 5'd0) && (MEM_WB_rd == ID_EX_rs1) && 
+            !(EX_MEM_RegWrite && (EX_MEM_rd != 5'd0) && (EX_MEM_rd == ID_EX_rs1))) begin
+            ForwardA = 2'b01;
+        end
+        if (MEM_WB_RegWrite && (MEM_WB_rd != 5'd0) && (MEM_WB_rd == ID_EX_rs2) && 
+            !(EX_MEM_RegWrite && (EX_MEM_rd != 5'd0) && (EX_MEM_rd == ID_EX_rs2))) begin
+            ForwardB = 2'b01;
+        end
+    end
+endmodule
+
+module HazardDetectionUnit (//冒险检测单元
+    input  wire [4:0] IF_ID_rs1,     // 刚刚取进来正在译码的指令的 rs1 (需要从 inst[19:15] 提取)
+    input  wire [4:0] IF_ID_rs2,     // 刚刚取进来正在译码的指令的 rs2 (需要从 inst[24:20] 提取)
+    
+    input  wire [4:0] ID_EX_rd,      // 前一条(正在执行的)指令的目标寄存器
+    input  wire       ID_EX_MemRead, // 前一条指令是不是 lw (读内存)
+    
+    output reg        Stall          // 1表示要停顿，0表示正常
+);
+    always @(*) begin
+        if (ID_EX_MemRead && ((ID_EX_rd == IF_ID_rs1) || (ID_EX_rd == IF_ID_rs2))) begin
+            // 发现正在执行的指令是 lw，且它要写的目标寄存器，正是当前译码指令要读的寄存器！
+            Stall = 1'b1;
+        end else begin
+            Stall = 1'b0;
+        end
+    end
 endmodule
